@@ -1,59 +1,74 @@
-"""High-level pipeline that wires reader → filter → aggregator → exporter."""
+"""High-level pipeline that wires reader → filter → aggregate → format/export."""
 
-from __future__ import annotations
-
-from datetime import datetime
-from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Dict, List, Optional
 
 from logslice.reader import read_entries_from_many
 from logslice.filter import apply_filters
 from logslice.aggregator import summarize
 from logslice.exporter import export_entries
+from logslice.formatter import format_entries
 
 
 def run_pipeline(
-    sources: Iterable[str | Path | None],
+    paths: List[Optional[str]],
     *,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
+    start=None,
+    end=None,
     pattern: Optional[str] = None,
-    pattern_field: str = "message",
-    aggregate_by: Optional[str] = None,
-    time_bucket: Optional[str] = None,
-    output_format: str = "jsonl",
-    output_path: Optional[str | Path] = None,
-    skip_unparseable: bool = True,
-) -> dict | None:
-    """Execute the full logslice pipeline.
+    pattern_field: Optional[str] = None,
+    aggregate: bool = False,
+    aggregate_field: Optional[str] = None,
+    bucket: Optional[str] = None,
+    output_format: str = "text",
+    output_fields: Optional[List[str]] = None,
+    color: bool = False,
+) -> str:
+    """Execute the full logslice pipeline and return the result as a string.
 
-    Returns a summary dict when *aggregate_by* or *time_bucket* is set,
-    otherwise returns ``None`` (output written via exporter).
+    Parameters
+    ----------
+    paths:
+        List of file paths to read; ``None`` entries trigger stdin reads.
+    start / end:
+        Optional :class:`datetime` bounds for time filtering.
+    pattern:
+        Optional regex pattern for message filtering.
+    pattern_field:
+        Field to match *pattern* against (defaults to ``message``).
+    aggregate:
+        When *True* run aggregation instead of raw output.
+    aggregate_field:
+        Field to group by when aggregating.
+    bucket:
+        Time-bucket granularity (``minute``, ``hour``, ``day``).
+    output_format:
+        One of ``"text"``, ``"jsonl"``, ``"csv"``.
+    output_fields:
+        Ordered list of fields to include in text / csv output.
+    color:
+        Emit ANSI colour codes in text output.
     """
-    entries = list(
-        read_entries_from_many(sources, skip_unparseable=skip_unparseable)
+    entries: List[Dict[str, Any]] = read_entries_from_many(paths)
+
+    entries = apply_filters(
+        entries,
+        start=start,
+        end=end,
+        pattern=pattern,
+        field=pattern_field,
     )
 
-    filtered = list(
-        apply_filters(
+    if aggregate:
+        summary = summarize(
             entries,
-            start=start,
-            end=end,
-            pattern=pattern,
-            field=pattern_field,
+            field=aggregate_field,
+            bucket=bucket,
         )
-    )
+        lines = [f"{key}\t{count}" for key, count in sorted(summary.items())]
+        return "\n".join(lines)
 
-    if aggregate_by or time_bucket:
-        return summarize(
-            filtered,
-            group_by=aggregate_by,
-            time_bucket=time_bucket,
-        )
+    if output_format == "text":
+        lines = format_entries(entries, fields=output_fields, color=color)
+        return "\n".join(lines)
 
-    export_entries(
-        filtered,
-        fmt=output_format,
-        destination=str(output_path) if output_path else None,
-    )
-    return None
+    return export_entries(entries, fmt=output_format, fields=output_fields)
