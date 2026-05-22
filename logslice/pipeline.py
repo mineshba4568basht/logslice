@@ -1,72 +1,64 @@
-"""End-to-end pipeline that wires reader → filter → sampler → aggregator → exporter."""
+"""High-level pipeline that wires together reader, filter, sort, and export."""
 
-from __future__ import annotations
-
-from datetime import datetime
 from typing import Optional
+from datetime import datetime
 
 from logslice.reader import read_entries_from_many
 from logslice.filter import apply_filters
-from logslice.sampler import sample_by_rate, sample_by_count, sample_every_nth
-from logslice.aggregator import summarize
+from logslice.sorter import sort_by_timestamp
 from logslice.exporter import export_entries
+from logslice.aggregator import summarize
+from logslice.sampler import sample_by_rate, sample_by_count
+from logslice.deduplicator import deduplicate_exact
 
 
 def run_pipeline(
     paths: list[str],
-    *,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     pattern: Optional[str] = None,
-    field: Optional[str] = None,
-    # sampling options — at most one should be set
-    sample_rate: Optional[float] = None,
-    sample_n: Optional[int] = None,
-    sample_nth: Optional[int] = None,
-    # output options
+    pattern_field: str = "message",
     output_format: str = "jsonl",
-    aggregate: bool = False,
-    time_bucket: Optional[str] = None,
-) -> str:
-    """Run the full logslice pipeline and return the output as a string.
+    output_path: Optional[str] = None,
+    sort: bool = True,
+    sort_reverse: bool = False,
+    deduplicate: bool = False,
+    sample_rate: Optional[float] = None,
+    sample_count: Optional[int] = None,
+    aggregate_field: Optional[str] = None,
+) -> Optional[dict]:
+    """Execute the full logslice pipeline.
 
-    Args:
-        paths: List of file paths to read; an empty list reads from stdin.
-        start: Optional lower bound for timestamp filtering.
-        end: Optional upper bound for timestamp filtering.
-        pattern: Optional regex pattern to match against raw log lines.
-        field: Field name used for aggregation counts.
-        sample_rate: Keep each entry with this probability (0–1).
-        sample_n: Keep a random reservoir of at most *n* entries.
-        sample_nth: Keep every *n*-th entry deterministically.
-        output_format: One of ``jsonl``, ``csv``, ``text``.
-        aggregate: When *True*, run summarize() instead of exporting raw entries.
-        time_bucket: Bucket size for time-based aggregation (e.g. ``hour``).
+    Reads entries from *paths* (or stdin if empty), applies time and pattern
+    filters, optionally deduplicates and samples, sorts by timestamp, then
+    either exports or returns an aggregation summary.
 
     Returns:
-        Rendered output as a single string.
+        A summary dict when *aggregate_field* is set, otherwise None.
     """
-    entries = list(read_entries_from_many(paths))
-    entries = list(apply_filters(entries, start=start, end=end, pattern=pattern))
+    entries = list(read_entries_from_many(paths or []))
 
-    # Apply at most one sampling strategy.
+    entries = apply_filters(
+        entries,
+        start=start,
+        end=end,
+        pattern=pattern,
+        pattern_field=pattern_field,
+    )
+
+    if deduplicate:
+        entries = deduplicate_exact(entries)
+
     if sample_rate is not None:
         entries = list(sample_by_rate(entries, rate=sample_rate))
-    elif sample_n is not None:
-        entries = sample_by_count(entries, n=sample_n)
-    elif sample_nth is not None:
-        entries = list(sample_every_nth(entries, n=sample_nth))
+    elif sample_count is not None:
+        entries = list(sample_by_count(entries, count=sample_count))
 
-    if aggregate:
-        summary = summarize(entries, field=field, time_bucket=time_bucket)
-        lines = []
-        if field and "by_field" in summary:
-            for key, count in summary["by_field"].items():
-                lines.append(f"{key}: {count}")
-        if time_bucket and "by_time" in summary:
-            for bucket, count in summary["by_time"].items():
-                lines.append(f"{bucket}: {count}")
-        lines.append(f"total: {summary.get('total', len(entries))}")
-        return "\n".join(lines)
+    if sort:
+        entries = sort_by_timestamp(entries, reverse=sort_reverse)
 
-    return export_entries(entries, fmt=output_format)
+    if aggregate_field:
+        return summarize(entries, group_by=aggregate_field)
+
+    export_entries(entries, fmt=output_format, path=output_path)
+    return None
