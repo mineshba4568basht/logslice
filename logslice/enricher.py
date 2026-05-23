@@ -26,11 +26,17 @@ def enrich_with_derived(
 ) -> Entry:
     """Return a copy of entry with field set to fn(entry).
     If the field already exists and overwrite is False, the entry is unchanged.
+    Raises ValueError if fn raises an exception, including the field name in the message.
     """
     if field in entry and not overwrite:
         return entry
     result = dict(entry)
-    result[field] = fn(entry)
+    try:
+        result[field] = fn(entry)
+    except Exception as exc:
+        raise ValueError(
+            f"Derived field '{field}' computation failed: {exc}"
+        ) from exc
     return result
 
 
